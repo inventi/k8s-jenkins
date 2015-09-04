@@ -1,0 +1,78 @@
+import groovy.json.JsonSlurper
+import org.apache.http.HttpResponse
+import org.apache.http.client.HttpClient
+import org.apache.http.client.methods.HttpDelete
+import org.apache.http.client.methods.HttpGet
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory
+import org.apache.http.conn.ssl.SSLContextBuilder
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.message.BasicHeader
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath group: 'org.apache.httpcomponents', name: 'httpclient', version: '4.5'
+    }
+}
+
+
+String selector = project.properties['selector'] ?: "none"
+String host = project.properties['host'] ?: "localhost:8080"
+String token = project.properties['token'] ?: "none"
+String server = "https://${host}"
+BasicHeader authHeader = new BasicHeader("Authorization", "Bearer "+token)
+SSLContextBuilder builder = new SSLContextBuilder();
+builder.loadTrustMaterial(null, new TrustSelfSignedStrategy());
+SSLConnectionSocketFactory sslsf = new SSLConnectionSocketFactory(builder.build(),
+        SSLConnectionSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER);
+HttpClient httpclient = HttpClients.custom().setSSLSocketFactory(sslsf).build();
+
+Closure getPods = { s ->
+    HttpGet rq = new HttpGet(server+"/api/v1/namespaces/default/pods?labelSelector=${s}")
+    rq.addHeader(authHeader)
+    println rq
+    HttpResponse resp = httpclient.execute(rq)
+    if(resp.getEntity().getContentType().value == "application/json"){
+        Object result = new JsonSlurper().parse(new InputStreamReader(resp.getEntity().content))
+        rq.releaseConnection()
+        return result
+    }else{
+        println resp
+        return null
+    }
+}
+
+
+tasks.create(name: 'restartPods') << {
+    Closure deletePod = { u ->
+        HttpDelete rq = new HttpDelete(u)
+        rq.addHeader(authHeader)
+        println rq
+        httpclient.execute(rq)
+        rq.releaseConnection()
+    }
+
+    Object pods = getPods selector
+
+    pods.items.each {
+        deletePod server + it.metadata.selfLink
+    }
+}
+
+tasks.create(name: 'waitPods') << {
+    Closure ready = { s ->
+        boolean r = true
+        getPods(s).items.each {
+            r = r && !"Pending".equals(it.status.phase)
+        }
+        return r
+    }
+
+    while(!ready(selector)){
+        println "waiting..."
+        Thread.sleep(10000);
+    }
+}

@@ -18,10 +18,10 @@ buildscript {
     }
 }
 
-
 String selector = project.properties['selector'] ?: "none"
 String host = project.properties['host'] ?: "localhost:8080"
 String token = project.properties['token'] ?: "none"
+String namespace = project.properties['namespace'] ?: "default"
 String server = "https://${host}"
 BasicHeader authHeader = new BasicHeader("Authorization", "Bearer "+token)
 SSLContextBuilder builder = new SSLContextBuilder();
@@ -30,8 +30,8 @@ SSLConnectionSocketFactory sslsf = new SSLConnectionSocketFactory(builder.build(
         SSLConnectionSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER);
 HttpClient httpclient = HttpClients.custom().setSSLSocketFactory(sslsf).build();
 
-Closure getPods = { s ->
-    HttpGet rq = new HttpGet(server+"/api/v1/namespaces/default/pods?labelSelector=${s}")
+Closure get = { String type, String s ->
+    HttpGet rq = new HttpGet(server+"/api/v1/namespaces/${namespace}/${type}?labelSelector=${s}")
     rq.addHeader(authHeader)
     println rq
     HttpResponse resp = httpclient.execute(rq)
@@ -45,6 +45,39 @@ Closure getPods = { s ->
     }
 }
 
+tasks.create(name: 'pingSvc') << {
+    Object svcs = get("services", selector)
+
+    svcs.items.each {
+        List p = it.metadata.selfLink.split("/")
+        p.add(3, "proxy")
+        p.add("ping")
+        String path = p.join("/")
+
+        long waitTimeout = 2000 * 60 * 1
+        long startTime = System.currentTimeMillis()
+        while(true){
+            HttpGet rq = new HttpGet(server + path)
+            rq.addHeader(authHeader)
+
+            println rq
+
+            HttpResponse resp = httpclient.execute(rq)
+            if(resp.statusLine.statusCode == 200){
+                rq.releaseConnection()
+                break
+            }else{
+                rq.releaseConnection()
+                if(System.currentTimeMillis() - startTime > waitTimeout){
+                  println resp
+                  break
+                }
+                Thread.sleep(5000)
+            }
+        }
+    }
+}
+
 
 tasks.create(name: 'restartPods') << {
     Closure deletePod = { u ->
@@ -55,7 +88,7 @@ tasks.create(name: 'restartPods') << {
         rq.releaseConnection()
     }
 
-    Object pods = getPods selector
+    Object pods = get("pods",selector)
 
     pods.items.each {
         deletePod server + it.metadata.selfLink
@@ -65,7 +98,7 @@ tasks.create(name: 'restartPods') << {
 tasks.create(name: 'waitPods') << {
     Closure ready = { s ->
         boolean r = true
-        getPods(s).items.each {
+        get("pods",s).items.each {
             r = r && !"Pending".equals(it.status.phase)
         }
         return r
